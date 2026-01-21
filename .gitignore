@@ -24,3 +24,6 @@ positive_s_test.py
 frequ_analysis/visual.md
 
 result/
+.DS_Store
+__pycache__/
+*.pyc
