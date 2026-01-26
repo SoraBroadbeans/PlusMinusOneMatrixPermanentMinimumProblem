@@ -27,7 +27,7 @@ matplotlib.rcParams['ps.fonttype'] = 42
 
 # macOS用の日本語フォント設定
 if platform.system() == 'Darwin':
-    plt.rcParams['font.family'] = ['Hiragino Sans', 'Hiragino Kaku Gothic Pro', 'sans-serif']
+    plt.rcParams['font.family'] = ['Hiragino Sans', 'AppleGothic', 'sans-serif']
 else:
     plt.rcParams['font.family'] = ['IPAexGothic', 'sans-serif']
 
@@ -92,7 +92,7 @@ def extract_n_from_filename(filepath: str) -> int:
 
 def get_krauter_divisor(n: int) -> int:
     """
-    Kräuter予想に基づく除数を計算
+    Kräuter予想に基づく除数 k(n) を計算
     n = 2^k - 1 の場合: 2^{n - floor(log2(n)) - 1}
     それ以外: 2^{n - floor(log2(n))}
     """
@@ -107,6 +107,14 @@ def get_krauter_divisor(n: int) -> int:
         exponent = n - floor_log2_n
 
     return 2 ** exponent
+
+
+def get_det_divisor(n: int) -> int:
+    """
+    determinant の正規化除数を計算
+    d(A) = det(A) / 2^{n-1}
+    """
+    return 2 ** (n - 1)
 
 
 def get_nice_ticks(vmin: float, vmax: float, num_ticks: int = 7) -> np.ndarray:
@@ -145,11 +153,11 @@ def plot_frequency_distribution(
     percentile_range: tuple = None,
     x_range: tuple = None,
     use_binning: bool = True,
-    n_bins: int = 100
+    n_bins: int = 100,
+    use_division: bool = True
 ):
     """
     頻度分布の棒グラフを作成する
-    注意: perm値の場合、dfは既にKräuter除数で割られている前提
     """
     fig, ax = plt.subplots(figsize=(12, 6))
 
@@ -158,9 +166,15 @@ def plot_frequency_distribution(
 
     # 軸ラベル
     if value_type == 'perm':
-        xlabel = f'perm / $2^{{{n} - \\lfloor \\log_2 {n} \\rfloor}}$'
+        if use_division:
+            xlabel = r'$p(A)$'
+        else:
+            xlabel = r'$\mathrm{per}(A)$'
     else:
-        xlabel = 'det'
+        if use_division:
+            xlabel = r'$d(A)$'
+        else:
+            xlabel = r'$\det(A)$'
 
     # 外れ値の処理（割り算後の値で行う）
     if percentile_range is not None:
@@ -179,18 +193,42 @@ def plot_frequency_distribution(
     if use_binning:
         # ビン化ヒストグラム
         vmin, vmax = values.min(), values.max()
-        bin_edges = np.linspace(vmin, vmax, n_bins + 1)
+        data_range = vmax - vmin
+
+        # 頻度最大の値と次に多い値からビン幅を計算
+        max_freq_idx = frequencies.argmax()
+        max_freq_value = values[max_freq_idx]
+
+        # 頻度でソートして上位2つを取得
+        freq_sorted_idx = np.argsort(frequencies)[::-1]
+        top_value = values[freq_sorted_idx[0]]
+        second_value = values[freq_sorted_idx[1]] if len(freq_sorted_idx) > 1 else top_value
+
+        # 上位2つの差でビン幅を決定
+        bin_width = abs(second_value - top_value)
+        if bin_width == 0:
+            bin_width = 1
+
+        # ビン数を計算
+        n_bins_calc = max(1, int(np.ceil(data_range / bin_width))) + 1
+        actual_bins = n_bins_calc
+
+        # 頻度最大値を中心にビン境界を生成
+        bin_start = top_value - bin_width / 2
+        while bin_start > vmin - bin_width / 2:
+            bin_start -= bin_width
+        bin_edges = np.arange(bin_start, vmax + bin_width, bin_width)
         bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-        bin_width = bin_edges[1] - bin_edges[0]
+        actual_bins = len(bin_centers)
 
         # 各ビンの頻度を集計
-        bin_frequencies = np.zeros(n_bins)
+        bin_frequencies = np.zeros(actual_bins)
         for val, freq in zip(values, frequencies):
             bin_idx = np.searchsorted(bin_edges[:-1], val, side='right') - 1
-            bin_idx = max(0, min(bin_idx, n_bins - 1))
+            bin_idx = max(0, min(bin_idx, actual_bins - 1))
             bin_frequencies[bin_idx] += freq
 
-        ax.bar(bin_centers, bin_frequencies, width=bin_width * 0.95,
+        ax.bar(bin_centers, bin_frequencies, width=bin_width,
                color='#4472C4', edgecolor='none')
 
         # x軸の範囲
@@ -225,7 +263,12 @@ def plot_frequency_distribution(
     # x軸の目盛りを適切に設定
     ticks = get_nice_ticks(vmin, vmax, num_ticks=8)
     ticks = ticks[(ticks >= vmin - margin) & (ticks <= vmax + margin)]
-    ax.set_xticks(ticks)
+
+    # 整数目盛りのみに絞り込む（重複防止）
+    int_ticks = np.unique(np.round(ticks).astype(int))
+    # 範囲内の整数のみを使用
+    int_ticks = int_ticks[(int_ticks >= np.floor(vmin)) & (int_ticks <= np.ceil(vmax))]
+    ax.set_xticks(int_ticks)
 
     # 科学表記を無効化（整数表示）
     ax.ticklabel_format(style='plain', axis='x')
@@ -291,19 +334,43 @@ def main():
                 print("エラー: 有効な整数を入力してください")
                 sys.exit(1)
 
-    # perm値の場合、ここで先に割り算を実行
+    # 正規化（割り算）の設定
+    use_division = False
     if value_type == 'perm':
-        divisor = get_krauter_divisor(n)
-        df['value'] = df['value'] / divisor
-        print(f"\n  Kräuter除数で割り算: 2^{int(np.log2(divisor))} = {divisor}")
-        print(f"  割り算後の値の範囲: {df['value'].min():.0f} ~ {df['value'].max():.0f}")
+        print(f"\n正規化の設定:")
+        print(f"  1: p(A) = per(A) / k(n) で正規化 (推奨)")
+        print(f"  2: 割らない（生の値 per(A)）")
+        div_choice = input("選択 (デフォルト: 1): ").strip()
+        if div_choice != '2':
+            use_division = True
+            divisor = get_krauter_divisor(n)
+            df['value'] = df['value'] / divisor
+            print(f"  k(n) = 2^{int(np.log2(divisor))} = {divisor} で割り算")
+            print(f"  p(A) の範囲: {df['value'].min():.0f} ~ {df['value'].max():.0f}")
+        else:
+            print(f"  割り算なし（生の値 per(A) を使用）")
+    else:  # det
+        print(f"\n正規化の設定:")
+        print(f"  1: d(A) = det(A) / 2^{{n-1}} で正規化 (推奨)")
+        print(f"  2: 割らない（生の値 det(A)）")
+        div_choice = input("選択 (デフォルト: 1): ").strip()
+        if div_choice != '2':
+            use_division = True
+            divisor = get_det_divisor(n)
+            df['value'] = df['value'] / divisor
+            print(f"  2^{{{n}-1}} = {divisor} で割り算")
+            print(f"  d(A) の範囲: {df['value'].min():.0f} ~ {df['value'].max():.0f}")
+        else:
+            print(f"  割り算なし（生の値 det(A) を使用）")
 
-    # 出力ファイル名
+    # 出力ファイル名（自動生成）
+    basename = os.path.basename(csv_path).replace('.csv', '')
+    if use_division:
+        output_name = f"{basename}_divided"
+    else:
+        output_name = f"{basename}_raw"
     print(f"\n出力先ディレクトリ: {OUTPUT_DIR}")
-    default_name = f"freq_n{n}_{value_type}"
-    output_name = input(f"出力ファイル名 (拡張子なし、デフォルト: {default_name}): ").strip()
-    if not output_name:
-        output_name = default_name
+    print(f"出力ファイル名: {output_name}.png")
 
     # 表示方法の選択
     print(f"\n表示方法:")
@@ -311,12 +378,6 @@ def main():
     print(f"  2: 個別値の棒グラフ")
     display_choice = input("選択 (デフォルト: 1): ").strip()
     use_binning = display_choice != '2'
-
-    n_bins = 100  # デフォルトビン数
-    if use_binning:
-        bins_input = input(f"ビン数 (デフォルト: {n_bins}): ").strip()
-        if bins_input.isdigit():
-            n_bins = int(bins_input)
 
     # 外れ値の処理
     print(f"\n外れ値の処理:")
@@ -340,9 +401,40 @@ def main():
     else:
         percentile_range = (0.5, 99.5)
 
-    # 対数スケールの選択
-    log_choice = input("\n対数スケールのグラフも作成しますか？ (y/n, デフォルト: n): ").strip().lower()
-    create_log = log_choice == 'y'
+    # ビン数の計算（外れ値処理後の範囲で）
+    n_bins = 100
+    if use_binning:
+        # 外れ値処理後の範囲を計算
+        df_temp = df.copy()
+        if percentile_range is not None:
+            all_values = np.repeat(df_temp['value'].values, df_temp['frequency'].values)
+            p_low, p_high = np.percentile(all_values, percentile_range)
+            df_temp = df_temp[(df_temp['value'] >= p_low) & (df_temp['value'] <= p_high)]
+        elif x_range is not None:
+            df_temp = df_temp[(df_temp['value'] >= x_range[0]) & (df_temp['value'] <= x_range[1])]
+
+        # 頻度最大の値と次に多い値からビン幅を計算
+        values_temp = df_temp['value'].values
+        frequencies_temp = df_temp['frequency'].values
+        freq_sorted_idx = np.argsort(frequencies_temp)[::-1]
+        top_value = values_temp[freq_sorted_idx[0]]
+        second_value = values_temp[freq_sorted_idx[1]] if len(freq_sorted_idx) > 1 else top_value
+
+        bin_width = abs(second_value - top_value)
+        if bin_width == 0:
+            bin_width = 1
+
+        data_range = values_temp.max() - values_temp.min()
+        default_bins = max(1, int(np.ceil(data_range / bin_width))) + 1
+
+        print(f"\n  頻度上位2値: {top_value:.0f}, {second_value:.0f}")
+        print(f"  計算されたビン幅: {bin_width:.0f}")
+        print(f"  推奨ビン数: {default_bins}")
+        bins_input = input(f"ビン数 (デフォルト: {default_bins}): ").strip()
+        if bins_input.isdigit():
+            n_bins = int(bins_input)
+        else:
+            n_bins = default_bins
 
     # 出力ディレクトリ確認
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -352,18 +444,12 @@ def main():
     print("グラフを作成中...")
     print("=" * 50)
 
-    # 通常スケール（PNG）
+    # グラフ出力（PNG）
     output_png = os.path.join(OUTPUT_DIR, f"{output_name}.png")
     plot_frequency_distribution(df, n, value_type, output_png, log_scale=False,
                                 percentile_range=percentile_range, x_range=x_range,
-                                use_binning=use_binning, n_bins=n_bins)
-
-    # 対数スケール（PNG）
-    if create_log:
-        output_png_log = os.path.join(OUTPUT_DIR, f"{output_name}_log.png")
-        plot_frequency_distribution(df, n, value_type, output_png_log, log_scale=True,
-                                    percentile_range=percentile_range, x_range=x_range,
-                                    use_binning=use_binning, n_bins=n_bins)
+                                use_binning=use_binning, n_bins=n_bins,
+                                use_division=use_division)
 
     print("\n" + "=" * 50)
     print("完了!")
